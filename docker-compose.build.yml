@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  be:
+    build:
+      context: .
+      x-bake:
+        tags:
+        - ${DOCKER_IMAGE}
+        - ${DOCKER_IMAGE_CACHE}
+        - ${DOCKER_IMAGE_LATEST}
+        cache_from:
+        - ${DOCKER_IMAGE_CACHE}
+        cache_to:
+        - ${DOCKER_IMAGE_CACHE}
+        output: type=registry
+        push: true
+        pull: true
+      #args:
+      # BUILD_TIME_VAR: ${ENV_FILE_VAR}

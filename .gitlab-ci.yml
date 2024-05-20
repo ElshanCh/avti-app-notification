@@ -1,0 +1,201 @@
+default:
+  image: docker:23.0.6-dind
+
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  DOCKER_BUILDKIT: 1
+  COMPOSE_DOCKER_CLI_BUILD: 1
+  DOCKER_IMAGE_CACHE: $CI_REGISTRY_IMAGE:build-cache
+  TEST_BRANCH: "develop"
+  PREPROD_BRANCH: "preprod"
+  PRODUCTION_BRANCH: "master"
+
+include:
+- template: 'Workflows/Branch-Pipelines.gitlab-ci.yml'
+- template: 'Workflows/MergeRequest-Pipelines.gitlab-ci.yml'
+- template: Jobs/Build.gitlab-ci.yml
+- template: Jobs/Container-Scanning.gitlab-ci.yml
+- template: Jobs/Secret-Detection.gitlab-ci.yml
+
+
+workflow:
+  rules:
+    - if: $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "ci" && $CI_MERGE_REQUEST_EVENT_TYPE == "merged_result"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+    - if: $CI_COMMIT_REF_NAME == $TEST_BRANCH || $CI_COMMIT_REF_NAME == $PREPROD_BRANCH || $CI_COMMIT_REF_NAME == $PRODUCTION_BRANCH
+
+# .getdockercompose: &getdockercompose
+    # - wget https://github.com/docker/compose/releases/download/$DC_V/docker-compose-$(uname -s)-$(uname -m) -O /usr/bin/docker-compose
+    # - wget https://github.com/docker/compose/releases/download/$DC_V/docker-compose-linux-x86_64 -O /usr/bin/docker-compose
+
+.tellmeenv: &setenv
+    - export CI_PROJECT_NAME=$(echo ${CI_PROJECT_NAME} | sed s./.-. | tr '[:upper:]' '[:lower:]')
+    - export CI_PROJECT_NAMESPACE=$(echo ${CI_PROJECT_NAMESPACE} | sed s./.-.)
+    - echo $DEPLOY_ENV
+    - echo $CI_PROJECT_NAME
+    - echo $CI_PROJECT_NAMESPACE
+    - echo $CI_COMMIT_REF_NAME
+
+#.preparedeploy: &preparedeploy
+#    - apk update && apk add --no-cache git
+#    - 'git clone https://gitlab-ci-token:${CI_JOB_TOKEN}@git.devops.lunalabs.it/presstoday/devops/mypt-docker-deployment.git deploy'
+#    - ln -fs deploy/docker-compose.yml .
+#    - ln -fs deploy/.env .
+#    - if [ -d deploy/${DEPLOY_ENV} ] ; then
+#        ln -fs deploy/$DEPLOY_ENV/docker-compose.override.yml .;
+#      fi;
+
+#.deployswarm: &deployswarm
+#    # SWARM DEPLOY
+#    - docker-compose -p ${CI_PROJECT_NAME}-${DEPLOY_ENV} -f docker-compose.yml -f docker-compose.swarm.yml --env-file .env config | egrep -v "^version|^name|host_ip|restart" > docker-compose.stack.yml
+#    - docker-compose -p ${CI_PROJECT_NAME}-${DEPLOY_ENV} pull
+#    - 'echo -e "version: \"3.8\"\n" >> docker-compose.stack.yml'
+#    - 'sed -i -E "s/(published: )\"([0-9]+)\"/\1\2/" docker-compose.stack.yml'
+#    - 'sed -i -E "s/s+#\s/ /g" docker-compose.stack.yml'
+#    - cat docker-compose.stack.yml
+#    - docker stack deploy -c docker-compose.stack.yml --with-registry-auth ${CI_PROJECT_NAMESPACE}
+
+.deploycompose: &deploycompose
+    # COMPOSE DEPLOY
+    - docker-compose -p ${CI_PROJECT_NAME}-${DEPLOY_ENV} config
+    - docker-compose -p ${CI_PROJECT_NAME}-${DEPLOY_ENV} pull
+    - docker-compose -p ${CI_PROJECT_NAME}-${DEPLOY_ENV} up -d
+
+build:
+    stage: build
+    tags:
+      - gitlab-builder
+    rules: 
+      - if: $CI_COMMIT_REF_NAME == $TEST_BRANCH
+        variables:
+          DEPLOY_ENV: test
+        allow_failure: false
+      - if: $CI_COMMIT_REF_NAME == $PREPROD_BRANCH
+        variables:
+          DEPLOY_ENV: preprod
+        allow_failure: false
+      - if: $CI_COMMIT_REF_NAME == $PRODUCTION_BRANCH
+        variables:
+          DEPLOY_ENV: prod
+        when: manual
+        allow_failure: false
+    variables:
+      DOCKER_IMAGE: $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}-${DEPLOY_ENV}
+      DOCKER_IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest-${DEPLOY_ENV}
+    before_script:
+        - *setenv
+        - echo "deploy stage:$CI_JOB_STAGE token:{ user:$CI_REGISTRY_USER pass:$CI_REGISTRY_PASSWORD } registry:$CI_REGISTRY"
+        - echo "$CI_REGISTRY_PASSWORD" | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+        - apk update && apk add git
+        # - *prepareenv
+    script:
+      - docker buildx create --name ${CI_PROJECT_NAME}-${DEPLOY_ENV} --use
+      - docker buildx bake -f docker-compose.build.yml --print
+      - docker buildx bake -f docker-compose.build.yml
+      - docker buildx rm
+
+container_scanning:
+  stage: test
+  rules:
+  - if: $CI_COMMIT_REF_NAME == $TEST_BRANCH
+    variables:
+      DEPLOY_ENV: test
+  - if: $CI_COMMIT_REF_NAME == $PREPROD_BRANCH
+    variables:
+      DEPLOY_ENV: preprod
+  - if: $CI_COMMIT_REF_NAME == $PRODUCTION_BRANCH
+    variables:
+      DEPLOY_ENV: prod
+  variables:
+    # di default usa Trivy
+    # CS_ANALYZER_IMAGE: registry.gitlab.com/security-products/container-scanning/grype:5
+    CS_IMAGE: $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}-${DEPLOY_ENV}
+    CS_REGISTRY_USER: $CI_REGISTRY_USER
+    CS_REGISTRY_PASSWORD: $CI_REGISTRY_PASSWORD
+    CS_DISABLE_LANGUAGE_VULNERABILITY_SCAN: "false"
+  needs:
+  - build
+  artifacts:
+    reports:
+      container_scanning: gl-container-scanning-report.json
+      dependency_scanning: gl-dependency-scanning-report.json
+    expire_in: 7days
+
+
+secret_detection:
+  stage: test
+  variables:
+    SECRETS_ANALYZER_VERSION: "4.5"
+
+# unit-tests:
+#     stage: tests
+#     needs:
+#         - build
+#     when: manual
+#     before_script:
+#         - *tellmeenv
+#         - *prepareenv
+#     script:
+#         - echo "application unit tests"
+
+# sast:
+#     stage: tests
+#     image: docker:20
+#     needs:
+#         - build
+#     when: manual
+#     before_script:
+#         - *tellmeenv
+#         - *prepareenv
+#     script:
+#         - echo "sonarqube (coming soon)"
+
+# dast:
+#     stage: tests
+#     needs:
+#         - build
+#     when: manual
+#     before_script:
+#         - *tellmeenv
+#         - *prepareenv
+#     script:
+#         - echo "owasp zap"
+
+deploy:
+    stage: deploy
+    rules:
+      - if: $CI_COMMIT_REF_NAME == $TEST_BRANCH
+        variables:
+          DEPLOY_ENV: test
+      - if: $CI_COMMIT_REF_NAME == $PREPROD_BRANCH
+        variables:
+          DEPLOY_ENV: preprod
+      - if: $CI_COMMIT_REF_NAME == $PRODUCTION_BRANCH
+        variables:
+          DEPLOY_ENV: prod
+    tags:
+    - auti-docker-deploy
+    #- $CI_COMMIT_REF_NAME
+    variables:
+      DOCKER_IMAGE: $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}-${DEPLOY_ENV}
+    needs:
+    - build
+    before_script:
+      - *setenv
+      - echo "deploy stage:$CI_JOB_STAGE token:{ user:$CI_REGISTRY_USER pass:$CI_REGISTRY_PASSWORD } registry:$CI_REGISTRY"
+      - echo "$CI_REGISTRY_PASSWORD" | docker login -u $CI_REGISTRY_USER $CI_REGISTRY --password-stdin
+    script:
+      #- *deployswarm
+      - *deploycompose
+    environment:
+      name: $DEPLOY_ENV
+      url: $APPLICATION_SERVICE_URL

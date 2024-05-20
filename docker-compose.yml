@@ -1,0 +1,28 @@
+version: '3'
+
+x-portainer-labels: &plabels
+  io.portainer.accesscontrol.teams: "${PORTAINER_TEAM}"
+  
+services:
+  avti-app-notification:
+    labels:
+      <<: *plabels
+    container_name: avti-app-notification
+    # the pipeline builds the container using the docker-compose.build.yml, on a dedicated server:
+    #build:
+    #  context: .
+    #  dockerfile: Dockerfile
+    image: ${DOCKER_IMAGE}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_PORT: ${DB_PORT}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER}
+      TWILIO_MESSAGING_SERVICE_SID: ${TWILIO_MESSAGING_SERVICE_SID}
+      PYTHONUNBUFFERED: 1
